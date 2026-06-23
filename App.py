@@ -31,7 +31,8 @@ TICKERS = [
     "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
     "META", "AVGO", "TSLA", "LLY", "WMT",
     "JPM", "V", "ORCL", "XOM", "MA",
-    "COST", "HD", "PG", "JNJ", "NFLX",
+    "COST", "HD", "PG", "JNJ", "NFLX", "MU", "SNDK", "WDC", "STX",
+    "LRCX", "AMD", "PANW", "NOW"
 ]
 
 # Fallbacks used ONLY when data can't be fetched.
