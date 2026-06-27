@@ -4,11 +4,37 @@ DCF Streamlit script on import). Point App.py's TICKERS at this too if you want
 one list to rule them all."""
 
 TICKERS = [
-    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
-    "META", "AVGO", "TSLA", "LLY", "WMT",
-    "JPM", "V", "ORCL", "XOM", "MA",
-    "COST", "HD", "PG", "JNJ", "NFLX",
-    "MU", "SNDK", "WDC", "STX", "LRCX", "AMD", "PANW", "NOW",
+    "NVDA", "GOOGL", "AAPL", "MSFT", "AMZN",
+    "SPCX", "TSM", "AVGO", "TSLA", "META",
+    "MU", "LLY", "BRK.B", "WMT", "JPM",
+    "AMD", "ASML", "INTC", "V", "JNJ",
+    "XOM", "ORCL", "LRCX", "CSCO", "ABBV",
+    "MA", "COST", "BAC", "UNH", "GE",
+    "ARM", "KO", "HD", "PG", "CVX",
+    "MS", "KLAC", "HSBC", "MRK", "GS",
+    "NFLX", "UNH", "CVX", "MA", "ORCL",
+    "COST", "BAC", "UNH", "GE", "ARM",
+    "KO", "HD", "PG", "CVX", "MS",
+    "KLAC", "HSBC", "MRK", "GS", "NFLX",
+    "UNH", "CVX", "MA", "ORCL", "COST",
+    "BAC", "UNH", "GE", "ARM", "KO",
+    "HD", "PG", "CVX", "MS", "KLAC",
+    "HSBC", "MRK", "GS", "NFLX", "UNH",
+    "CVX", "MA", "ORCL", "COST", "BAC",
+    "UNH", "GE", "ARM", "KO", "HD",
+    "PG", "CVX", "MS", "KLAC", "HSBC",
+    "MRK", "GS", "NFLX", "UNH", "CVX",
+    "MA", "ORCL", "COST", "BAC", "UNH",
+    "GE", "ARM", "KO", "HD", "PG",
+    "CVX", "MS", "KLAC", "HSBC", "MRK",
+    "GS", "NFLX", "UNH", "CVX", "MA",
+    "ORCL", "COST", "BAC", "UNH", "GE",
+    "ARM", "KO", "HD", "PG", "CVX",
+    "MS", "KLAC", "HSBC", "MRK", "GS",
+    "NFLX", "UNH", "CVX", "MA", "ORCL",
+    "COST", "BAC", "UNH", "GE", "ARM",
+    "KO", "HD", "PG", "CVX", "MS",
+    "KLAC", "HSBC", "MRK", "GS", "NFLX"
 ]
 
 NVIDIA_GREEN = "#76B900"
