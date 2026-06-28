@@ -241,7 +241,7 @@ st.markdown(f"""
   .stApp {{ background:
       radial-gradient(1200px 600px at 80% -10%, #14210a 0%, transparent 55%),
       #0a0a0a; }}
-  #MainMenu, footer, header {{ visibility: hidden; }}
+  #MainMenu, footer {{ visibility: hidden; }}
   .hero {{ padding: 8px 0 4px 0; border-bottom: 1px solid #1f1f1f; margin-bottom: 14px; }}
   .hero h1 {{ font-weight: 800; letter-spacing: -0.5px; font-size: 2.05rem; margin: 0;
               color: #f4f4f4; }}
