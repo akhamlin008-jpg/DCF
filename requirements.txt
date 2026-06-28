@@ -1,0 +1,15 @@
+# DCF + multi-factor scoring + risk engine
+streamlit>=1.30
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+
+# --- market data ---
+# Pin yfinance current-ish: older versions break on Yahoo's crumb/cookie + the
+# curl_cffi "chromeNNN not supported" mismatch. If you hit ImpersonateError,
+# upgrade yfinance first, or pin curl_cffi to a version it supports.
+yfinance>=0.2.65
+curl_cffi>=0.7.4          # browser-TLS impersonation to reduce 429s
+requests>=2.31            # SEC EDGAR
+pandas-datareader>=0.10   # Stooq price fallback (free, no key)
+pyarrow>=14.0             # parquet disk cache for price frames
