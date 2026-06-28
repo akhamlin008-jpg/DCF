@@ -1,20 +1,20 @@
 """
 Two-Stage DCF — scalable, autofilled, editable.
 
-Design notes for the next person (or you in six months):
-  * All finance math lives in dcf_core.py (no streamlit/yfinance there) so it's
-    unit-testable offline and reusable from a batch scaler.
-  * Data layer is PARALLEL (ThreadPoolExecutor) and cached PER TICKER, so adding
-    a symbol re-fetches only that symbol instead of nuking the whole cache.
-  * Betas come from ONE batched price download (returns regression vs SPY),
-    which replaces ~N slow `Ticker.info` scrapes — the old bottleneck.
-  * Each ticker panel is an st.fragment: editing one stock's inputs reruns only
-    that card, not all of them. This is what lets the page scale past a handful.
+RELIABILITY CHANGES (vs original)
+---------------------------------
+* Shares ONE universe with the Factor/Risk pages (from universe.py), so a name
+  fetched here is cached for them too.
+* Per-ticker fetch is DISK-cached (cache_layer) + memoized in-session, so the
+  page survives Codespaces/app restarts and 100 opens/day ≈ 1 fetch/ticker/day.
+* All Yahoo calls go through net_layer (curl_cffi chrome session + 429 backoff).
+* MAX_WORKERS 8 -> 3 (concurrency is what trips Yahoo's limiter).
+* use_container_width replaced with width="stretch" (the former is deprecated).
+* Header shows data freshness from the on-disk cache.
 
-yfinance is unofficial scraped data and renames fields between versions. Verify
-FCF / cash / debt / shares against the latest 10-K (SEC EDGAR) before trusting
-any single number. Field-name drift shows up as "missing"; widen the row-name
-lists in _statement_value() / _extract_fcf_series() when it does.
+All finance math still lives in dcf_core.py (no streamlit/yfinance there).
+Verify FCF / cash / debt / shares against the latest 10-K (SEC EDGAR) before
+trusting any single number.
 """
 from __future__ import annotations
 
@@ -26,39 +26,30 @@ import streamlit as st
 import yfinance as yf
 
 import dcf_core as core
+import cache_layer as kv
+import net_layer as nl
+from universe import TICKERS, NVIDIA_GREEN
 
 try:
-    # Lets worker threads keep Streamlit's script context (silences warnings
-    # and keeps cache_data behaving inside the pool).
     from streamlit.runtime.scriptrunner import add_script_run_context
-except Exception:  # pragma: no cover - older/newer streamlit
+except Exception:  # pragma: no cover
     def add_script_run_context(thread, ctx=None):  # type: ignore
         return thread
 
 # --- Configuration ----------------------------------------------------------- #
-TICKERS = [
-    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN",
-    "META", "AVGO", "TSLA", "LLY", "WMT",
-    "JPM", "V", "ORCL", "XOM", "MA",
-    "COST", "HD", "PG", "JNJ", "NFLX",
-    "MU", "SNDK", "WDC", "STX", "LRCX", "AMD", "PANW", "NOW",
-]
 BENCHMARK = "SPY"
-
-DEFAULT_TERMINAL = 0.025     # 2.5%
-DEFAULT_ERP = 0.045          # equity risk premium (ASSUMPTION, not a fact)
-DEFAULT_RF = 0.043           # risk-free fallback if ^TNX fetch fails
+DEFAULT_TERMINAL = 0.025
+DEFAULT_ERP = 0.045
+DEFAULT_RF = 0.043
 FALLBACK_G1 = 0.10
 CAGR_CAP = (-0.10, 0.25)
 CACHE_TTL = 24 * 60 * 60
-MAX_WORKERS = 8
-BETA_LOOKBACK = "3y"         # weekly returns window for regression beta
-
-NVIDIA_GREEN = "#76B900"
+MAX_WORKERS = 3
+BETA_LOOKBACK = "3y"
 
 
 # =============================================================================
-# Data layer
+# Data layer  (disk-cached + hardened session)
 # =============================================================================
 def _statement_value(df, *names):
     if df is None or getattr(df, "empty", True):
@@ -72,8 +63,6 @@ def _statement_value(df, *names):
 
 
 def _extract_fcf_series(cf):
-    """Return FCF oldest->newest as a plain list, or []. Handles both the
-    direct 'Free Cash Flow' row and the OCF+Capex reconstruction."""
     if cf is None or getattr(cf, "empty", True):
         return []
     if "Free Cash Flow" in cf.index:
@@ -87,23 +76,19 @@ def _extract_fcf_series(cf):
         if not (ocf and cx):
             return []
         s = (cf.loc[ocf] + cf.loc[cx]).dropna()
-    # yfinance columns are newest-first; reverse to chronological
     return [float(v) for v in s.iloc[::-1].tolist()]
 
 
-@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
-def fetch_one(ticker: str) -> dict:
-    """Per-ticker fetch (cached individually). No `.info` call — fast_info plus
-    the statement frames cover everything except beta, which we batch separately."""
+def _fetch_one_live(ticker: str) -> dict:
     out = {"ticker": ticker, "fcf": None, "fcf_series": [], "sbc": None,
            "shares": None, "cash": None, "debt": None, "price": None,
            "market_cap": None, "interest_expense": None, "tax_rate": 0.21,
            "analyst_g5": None, "hist_cagr": None, "missing": [], "error": None}
     try:
-        t = yf.Ticker(ticker)
-        cf = getattr(t, "cashflow", None)
-        bs = getattr(t, "balance_sheet", None)
-        inc = getattr(t, "income_stmt", None)
+        t = nl.ticker(ticker, yf)
+        cf = nl.with_backoff(lambda: getattr(t, "cashflow", None))
+        bs = nl.with_backoff(lambda: getattr(t, "balance_sheet", None))
+        inc = nl.with_backoff(lambda: getattr(t, "income_stmt", None))
         fi = getattr(t, "fast_info", {}) or {}
 
         series = _extract_fcf_series(cf)
@@ -112,8 +97,6 @@ def fetch_one(ticker: str) -> dict:
         out["hist_cagr"] = core.robust_cagr(series, cap=CAGR_CAP)
         out["sbc"] = _statement_value(cf, "Stock Based Compensation")
 
-        # Standardized, CONSISTENT cash definition across every ticker:
-        # cash & equivalents + short-term investments (what you'd net vs debt).
         out["cash"] = _statement_value(
             bs, "Cash Cash Equivalents And Short Term Investments",
             "Cash And Cash Equivalents And Short Term Investments",
@@ -147,16 +130,15 @@ def fetch_one(ticker: str) -> dict:
         if tax is not None and pretax and pretax > 0:
             out["tax_rate"] = min(max(tax / pretax, 0.0), 0.40)
 
-        # analyst 5y growth (best-effort; shape varies by yfinance version)
         try:
-            ge = t.growth_estimates
+            ge = nl.with_backoff(lambda: t.growth_estimates)
             if ge is not None and not ge.empty:
                 idx = next((i for i in ge.index
                             if str(i).lower().replace(" ", "")
                             in ("+5y", "5y", "next5years", "+5years")), None)
                 if idx is not None:
-                    row = ge.loc[idx]
-                    val = float(row.dropna().iloc[0]) if hasattr(row, "dropna") else float(row)
+                    rrow = ge.loc[idx]
+                    val = float(rrow.dropna().iloc[0]) if hasattr(rrow, "dropna") else float(rrow)
                     out["analyst_g5"] = val / 100.0 if abs(val) > 1.5 else val
         except Exception:
             pass
@@ -170,48 +152,72 @@ def fetch_one(ticker: str) -> dict:
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def fetch_one(ticker: str) -> dict:
+    """In-session memo over a disk cache. Disk survives restarts; the decorator
+    avoids re-reading disk within a session."""
+    ck = f"dcf_fund:{ticker}"
+    cached = kv.get(ck, max_age_sec=CACHE_TTL)
+    if cached is not None:
+        return cached
+    out = _fetch_one_live(ticker)
+    if not out.get("error"):
+        kv.put(ck, out)
+    return out
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_betas(tickers: tuple) -> dict:
-    """One batched download -> regression beta vs SPY on weekly returns.
-    Replaces N slow `.info` scrapes with a single network call."""
-    try:
-        data = yf.download(list(tickers) + [BENCHMARK], period=BETA_LOOKBACK,
-                           interval="1wk", auto_adjust=True, progress=False)
-        px = data["Close"] if "Close" in data else data
-        rets = px.pct_change().dropna(how="all")
-        mkt = rets[BENCHMARK]
-        var_m = mkt.var()
-        betas = {}
-        for tk in tickers:
-            if tk in rets and var_m:
-                cov = rets[tk].cov(mkt)
-                betas[tk] = float(cov / var_m)
-            else:
-                betas[tk] = None
-        return betas
-    except Exception:
+    """One batched download -> regression beta vs SPY (weekly). Disk-cached
+    frame so restarts don't re-download."""
+    import hashlib
+    h = hashlib.md5(",".join(sorted(tickers)).encode()).hexdigest()[:10]
+    close = kv.get_df(f"dcf_beta_px:{h}", max_age_sec=CACHE_TTL)
+    if close is None:
+        try:
+            data = nl.with_backoff(
+                yf.download, list(tickers) + [BENCHMARK], period=BETA_LOOKBACK,
+                interval="1wk", auto_adjust=True, progress=False, session=nl.SESSION)
+            close = data["Close"] if (data is not None and "Close" in data) else data
+            if close is not None and not getattr(close, "empty", True):
+                kv.put_df(f"dcf_beta_px:{h}", close)
+        except Exception:
+            close = None
+    if close is None or getattr(close, "empty", True):
         return {tk: None for tk in tickers}
+    rets = close.pct_change().dropna(how="all")
+    if BENCHMARK not in rets:
+        return {tk: None for tk in tickers}
+    mkt = rets[BENCHMARK]
+    var_m = mkt.var()
+    return {tk: (float(rets[tk].cov(mkt) / var_m) if (tk in rets and var_m) else None)
+            for tk in tickers}
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def fetch_risk_free():
+    cached = kv.get("market:rf", max_age_sec=CACHE_TTL)
+    if cached is not None:
+        return cached
     try:
-        v = yf.Ticker("^TNX").fast_info.get("last_price")
+        t = nl.ticker("^TNX", yf)
+        v = t.fast_info.get("last_price")
         if v is None:
             return None
         v = float(v)
-        return v / 10.0 if v > 25 else v   # ^TNX historically quoted x10
+        rf = v / 10.0 if v > 25 else v
+        kv.put("market:rf", rf / 100.0)
+        return rf
     except Exception:
         return None
 
 
 def fetch_all(tickers: tuple) -> dict:
-    """Parallel per-ticker fetch + one batched beta call + risk-free."""
     stocks: dict = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futs = {}
         for tk in tickers:
             fut = ex.submit(fetch_one, tk)
-            add_script_run_context(fut)  # propagate streamlit ctx to worker
+            add_script_run_context(fut)
             futs[fut] = tk
         for fut in futs:
             tk = futs[fut]
@@ -247,14 +253,11 @@ st.markdown(f"""
               color: #f4f4f4; }}
   .hero h1 span {{ color: {NVIDIA_GREEN}; }}
   .hero p {{ color: #9a9a9a; margin: 4px 0 0 0; font-size: 0.92rem; }}
-  /* expander = card */
   div[data-testid="stExpander"] {{ background: #111313; border: 1px solid #232323;
       border-radius: 14px; margin-bottom: 10px; }}
   div[data-testid="stExpander"] summary:hover {{ color: {NVIDIA_GREEN}; }}
   div[data-testid="stExpander"] summary {{ font-weight: 600; }}
-  /* metrics */
   div[data-testid="stMetricValue"] {{ font-weight: 800; }}
-  /* inputs */
   .stNumberInput input {{ background:#0e0e0e; border:1px solid #2a2a2a; color:#eee; }}
   .stButton button {{ background:{NVIDIA_GREEN}; color:#0a0a0a; border:none;
       font-weight:700; border-radius:8px; }}
@@ -272,8 +275,18 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # --- data load -------------------------------------------------------------- #
-with st.spinner("Pulling financials in parallel (cached 24h)…"):
+with st.spinner("Pulling financials (cached on disk, 24h)…"):
     payload = fetch_all(tuple(TICKERS))
+
+# --- freshness line --------------------------------------------------------- #
+def _freshness_note(tickers):
+    ages = [kv.age_seconds(f"dcf_fund:{tk}") for tk in tickers]
+    ages = [a for a in ages if a is not None]
+    if not ages:
+        return "<span class='fresh-stale'>freshly fetched (no cache yet)</span>"
+    hrs = max(ages) / 3600.0
+    cls = "fresh-ok" if hrs < 24 else "fresh-stale" if hrs < 72 else "fresh-old"
+    return f"<span class='{cls}'>cache up to {hrs:.0f}h old</span>"
 
 # --- sidebar ---------------------------------------------------------------- #
 st.sidebar.header("Macro knobs")
@@ -303,12 +316,15 @@ if c1.button("↻ Re-seed all"):
     st.rerun()
 if c2.button("🔄 Refresh data"):
     fetch_one.clear(); fetch_betas.clear(); fetch_risk_free.clear()
+    for tk in TICKERS:                      # also clear the disk cache
+        kv.delete(f"dcf_fund:{tk}")
     st.rerun()
 
 st.caption(f"Data as of **{payload['as_of']:%Y-%m-%d %H:%M}** · "
            f"risk-free {rf*100:.2f}% · ERP {erp*100:.2f}% · "
            f"{len([s for s in payload['stocks'].values() if not s.get('error')])}"
-           f"/{len(TICKERS)} loaded")
+           f"/{len(TICKERS)} loaded · {_freshness_note(TICKERS)}",
+           unsafe_allow_html=True)
 
 
 def _base_fcf(s):
@@ -357,7 +373,7 @@ styled = (summ.style
           .format({"Fair": "${:,.2f}", "Price": "${:,.2f}", "MoS %": "{:+.1f}%"},
                   na_rep="—")
           .background_gradient(cmap="RdYlGn", subset=["MoS %"], vmin=-60, vmax=120))
-st.dataframe(styled, hide_index=True, use_container_width=True,
+st.dataframe(styled, hide_index=True, width="stretch",
              column_config={"Flags": st.column_config.TextColumn(width="large")})
 
 st.subheader("Per-stock detail")
@@ -433,7 +449,7 @@ def render_ticker(tk: str):
             proj = pd.DataFrame(res.rows)
             proj["FCF"] = (proj["FCF"] / 1e6).round(0)
             proj["PV of FCF"] = (proj["PV of FCF"] / 1e6).round(0)
-            st.dataframe(proj, hide_index=True, use_container_width=True)
+            st.dataframe(proj, hide_index=True, width="stretch")
             st.caption(f"PV(FCF) {m(res.pv_fcf_sum)} · PV(TV) {m(res.pv_tv)} "
                        f"({res.tv_fraction:.0%} of EV) · EV {m(res.ev)} · "
                        f"Equity {m(res.equity)}")
