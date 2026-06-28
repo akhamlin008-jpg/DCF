@@ -1,6 +1,0 @@
-# DCF + multi-factor scoring + risk engine
-streamlit>=1.30
-yfinance>=0.2.40
-numpy>=1.24
-pandas>=2.0
-matplotlib>=3.7
